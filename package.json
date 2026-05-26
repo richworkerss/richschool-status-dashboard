@@ -1,0 +1,30 @@
+{
+  "name": "richschool-status-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "NAS_DEBUG=true next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "record-history": "tsx scripts/record-storage-history.ts",
+    "record-history:force": "tsx scripts/record-storage-history.ts --force",
+    "record-history:dry": "tsx scripts/record-storage-history.ts --dry-run",
+    "push-to-cf": "tsx scripts/push-to-cloudflare.ts",
+    "push-to-cf:dry": "tsx scripts/push-to-cloudflare.ts --dry-run"
+  },
+  "dependencies": {
+    "next": "14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "undici": "6.19.8"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.10",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "tsx": "^4.19.2",
+    "typescript": "5.5.3",
+    "wrangler": "^4.94.0"
+  }
+}

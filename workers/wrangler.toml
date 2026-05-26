@@ -1,0 +1,29 @@
+name              = "richschool-dashboard-api"
+main              = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+# ── D1 데이터베이스 ────────────────────────────────────────────────────────────
+# 1. `npm run db:create` 를 실행하면 아래와 같은 출력이 나옵니다:
+#
+#      ✅ Successfully created DB 'richschool-storage-history'
+#      {
+#        "uuid": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+#        ...
+#      }
+#
+# 2. 출력된 uuid를 아래 database_id 에 붙여넣으세요.
+# 3. 그 다음 `npm run db:init` 으로 테이블을 생성하세요.
+# ─────────────────────────────────────────────────────────────────────────────
+
+ [[d1_databases]]
+ binding = "DB"
+ database_name = "richschool-storage-history"
+ database_id = "79fd6a57-bb40-4521-9b0f-77e2f5bfae04"
+
+# ── Secrets (배포 후 wrangler secret put 으로 등록) ────────────────────────────
+# CF_INGEST_API_KEY  — 수집기 인증용 임의 문자열
+#
+# 등록 방법:
+#   npx wrangler secret put CF_INGEST_API_KEY
+#   (프롬프트에 임의의 긴 문자열 입력, 예: openssl rand -base64 32)
+# ─────────────────────────────────────────────────────────────────────────────

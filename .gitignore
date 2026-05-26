@@ -1,0 +1,17 @@
+node_modules/
+.next/
+out/
+build/
+.DS_Store
+.env*.local
+*.log
+*.tsbuildinfo
+next-env.d.ts.bak
+
+
+# 자동 기록되는 NAS 사용량 히스토리 파일 (로컬 운영 데이터)
+data/
+
+# Cloudflare Workers 서브프로젝트 의존성
+workers/node_modules/
+workers/.wrangler/
