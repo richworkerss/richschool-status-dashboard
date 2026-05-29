@@ -48,3 +48,9 @@ CREATE TABLE IF NOT EXISTS service_status (
 );
 CREATE INDEX IF NOT EXISTS idx_svc_service_recorded
   ON service_status(service_id, recorded_at DESC);
+
+-- ④ 설정값 (새로고침 트리거 등)
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);

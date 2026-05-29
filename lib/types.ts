@@ -89,3 +89,24 @@ export type StorageHistoryResponse =
 export type NasStorageResponse =
   | { ok: true; data: NasStorageInfo }
   | { ok: false; error: string; configured: boolean };
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   서비스 이력
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/** 특정 수집 시점(배치)의 단일 서비스 상태 레코드 */
+export type ServiceRecord = {
+  recordedAt:  string;                  // ISO 8601 — 같은 값끼리 동일 배치
+  serviceId:   string;
+  name:        string;
+  category?:   string;
+  status:      ServiceStatusLevel;
+  responseMs:  number | null;
+  httpStatus:  number | null;
+  message?:    string;
+};
+
+/** 서비스 이력 API 응답 */
+export type ServiceHistoryResponse =
+  | { ok: true;  records: ServiceRecord[] }
+  | { ok: false; error: string };

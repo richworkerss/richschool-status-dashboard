@@ -1,8 +1,9 @@
 'use client';
 
-import Link from 'next/link';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getApiBase } from '@/lib/api';
+import { NasHistoryTab } from '@/app/components/NasHistoryTab';
+import { ServiceHistorySection } from '@/app/components/ServiceHistorySection';
 import type {
   HealthResponse,
   NasDisk,
@@ -70,28 +71,37 @@ function computeOverall(services: ServiceStatus[]): OverallLevel {
 }
 
 export default function DashboardPage() {
-  const [data,          setData]          = useState<HealthResponse | null>(null);
-  const [isRefreshing,  setIsRefreshing]  = useState(false);
-  const [error,         setError]         = useState<string | null>(null);
-  const [checkedAt,     setCheckedAt]     = useState<string | null>(null);
-  const [nasData,       setNasData]       = useState<NasStorageResponse | null>(null);
+  const [data,           setData]           = useState<HealthResponse | null>(null);
+  const [isRefreshing,   setIsRefreshing]   = useState(false);
+  const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
+  const [showToast,      setShowToast]      = useState(false);
+  const [toastKey,       setToastKey]       = useState(0);
+  const [error,          setError]          = useState<string | null>(null);
+  const [checkedAt,      setCheckedAt]      = useState<string | null>(null);
+  const [nasData,        setNasData]        = useState<NasStorageResponse | null>(null);
 
-  const apiBase = getApiBase();
+  const apiBase          = getApiBase();
+  const toastTimer       = useRef<ReturnType<typeof setTimeout>  | null>(null);
+  const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [refreshElapsed, setRefreshElapsed] = useState(0);
+
+  const triggerToast = useCallback(() => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToastKey(k => k + 1); // 매번 새 key → 애니메이션 재시작 보장
+    setShowToast(true);
+    toastTimer.current = setTimeout(() => setShowToast(false), 3_000);
+  }, []);
 
   const fetchServices = useCallback(async () => {
-    setIsRefreshing(true);
     setError(null);
     try {
       const res = await fetch(`${apiBase}/api/services`, { cache: 'no-store' });
       if (!res.ok) throw new Error(`서비스 상태 API 호출 실패 (${res.status})`);
       const json: HealthResponse = await res.json();
       setData(json);
-      // Workers에서 반환한 수집 기준 시각을 그대로 표시합니다.
       if (json.checkedAt) setCheckedAt(json.checkedAt);
     } catch (e) {
       setError((e as Error).message);
-    } finally {
-      setIsRefreshing(false);
     }
   }, [apiBase]);
 
@@ -106,17 +116,75 @@ export default function DashboardPage() {
     }
   }, [apiBase]);
 
-  const handleRefresh = useCallback(() => {
-    fetchServices();
-    fetchNas();
-  }, [fetchServices, fetchNas]);
+  const handleRefresh = useCallback(async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    setError(null);
+    setRefreshElapsed(0);
+
+    // 카운트다운 진행 바: 1초마다 elapsed 증가
+    if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+    progressTimerRef.current = setInterval(() => {
+      setRefreshElapsed(e => e + 1);
+    }, 1_000);
+
+    const prevCheckedAt = checkedAt;
+
+    try {
+      // 1. Workers에 수집 트리거 전송
+      setRefreshMessage('1분만 기다려주세요');
+      const triggerRes = await fetch(`${apiBase}/api/request-refresh`, {
+        method: 'POST', cache: 'no-store',
+      });
+
+      if (!triggerRes.ok) throw new Error('trigger_failed');
+
+      // 2. NAS 수집기가 응답할 때까지 폴링 (최대 90초, 3초 간격)
+      const deadline = Date.now() + 90_000;
+      while (Date.now() < deadline) {
+        await new Promise<void>(r => setTimeout(r, 3_000));
+        try {
+          const res  = await fetch(`${apiBase}/api/services`, { cache: 'no-store' });
+          if (!res.ok) continue;
+          const json: HealthResponse = await res.json();
+          const isNew = prevCheckedAt
+            ? json.checkedAt && json.checkedAt > prevCheckedAt
+            : !!json.checkedAt;
+          if (isNew) {
+            setData(json);
+            if (json.checkedAt) setCheckedAt(json.checkedAt);
+            fetchNas();
+            triggerToast();
+            return;
+          }
+        } catch { continue; }
+      }
+      // 타임아웃 — 그냥 현재 상태 표시
+    } catch {
+      // 트리거 실패(로컬 개발 등) → 직접 새로고침
+      await fetchServices();
+      await fetchNas();
+    } finally {
+      if (progressTimerRef.current) {
+        clearInterval(progressTimerRef.current);
+        progressTimerRef.current = null;
+      }
+      setIsRefreshing(false);
+      setRefreshMessage(null);
+      setRefreshElapsed(0);
+    }
+  }, [apiBase, checkedAt, isRefreshing, fetchServices, fetchNas, triggerToast]);
 
   useEffect(() => {
     fetchServices();
     fetchNas();
-    const id = setInterval(handleRefresh, REFRESH_INTERVAL_MS);
+    // 백그라운드 자동 갱신: D1 최신 데이터를 읽어오는 것만 수행 (NAS 수집 트리거 없음)
+    const id = setInterval(() => {
+      fetchServices();
+      fetchNas();
+    }, REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [fetchServices, fetchNas, handleRefresh]);
+  }, [fetchServices, fetchNas]);
 
   const overall: OverallLevel = useMemo(
     () => (data ? computeOverall(data.services) : 'loading'),
@@ -142,19 +210,37 @@ export default function DashboardPage() {
       <section className={`hero hero-${overall}`} aria-live="polite">
         <div className="hero-toolbar">
           <div className="hero-meta-block">
-            <span className="hero-meta-label">데이터 기준</span>
+            <span className="hero-meta-label">마지막 확인시간</span>
             <span className="hero-meta-value">
               {checkedAt ? formatTime(checkedAt) : '확인 중...'}
             </span>
           </div>
-          <button
-            onClick={handleRefresh}
-            disabled={isRefreshing}
-            className="refresh-button"
-            aria-label="지금 상태 새로고침"
-          >
-            {isRefreshing ? '새로고침 중...' : '지금 새로고침'}
-          </button>
+          <div className="refresh-button-wrap">
+            <button
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              className={`refresh-button${isRefreshing ? ' refresh-button--loading' : ''}`}
+              aria-label="지금 상태 새로고침"
+            >
+              {isRefreshing && <span className="refresh-spinner" aria-hidden="true" />}
+              {refreshMessage ?? (isRefreshing ? '새로고침 중...' : '새로고침')}
+            </button>
+            {isRefreshing && (
+              <div className="refresh-progress-container">
+                <div className="refresh-progress-track">
+                  <div
+                    className="refresh-progress-fill"
+                    style={{ width: `${Math.min(90, (refreshElapsed / 60) * 100)}%` }}
+                  />
+                </div>
+                <span className="refresh-progress-label">
+                  {refreshElapsed < 57
+                    ? `약 ${60 - refreshElapsed}초 남음`
+                    : '곧 완료됩니다...'}
+                </span>
+              </div>
+            )}
+          </div>
         </div>
         <div className="hero-light">
           <span className="hero-light-disc">
@@ -180,7 +266,7 @@ export default function DashboardPage() {
       )}
 
       {nasData && nasData.ok && (
-        <NasStorageSection info={nasData.data} />
+        <NasStorageSection info={nasData.data} apiBase={apiBase} />
       )}
       {nasData && !nasData.ok && nasData.configured && (
         <div className="error-banner nas-error-banner">
@@ -205,9 +291,23 @@ export default function DashboardPage() {
         ))}
       </section>
 
+      <ServiceHistorySection apiBase={apiBase} />
+
       <footer className="footer">
         <p>본 대시보드는 사내 운영팀의 빠른 상태 확인을 위해 제공됩니다.</p>
       </footer>
+
+      {showToast && (
+        <div key={toastKey} className="toast" role="status" aria-live="polite">
+          <span className="toast-icon">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+              <path d="M1.5 5l2.5 2.5 4.5-5" stroke="#fff" strokeWidth="1.6"
+                strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </span>
+          업데이트가 완료되었습니다
+        </div>
+      )}
     </main>
   );
 }
@@ -333,7 +433,9 @@ function formatBytes(bytes: number | null | undefined): string {
   return `${val} ${units[i]}`;
 }
 
-function NasStorageSection({ info }: { info: NasStorageInfo }) {
+function NasStorageSection({ info, apiBase }: { info: NasStorageInfo; apiBase: string }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
   const usagePct: number | null =
     info.totalBytes != null && info.totalBytes > 0 && info.usedBytes != null
       ? Math.round((info.usedBytes / info.totalBytes) * 100)
@@ -356,12 +458,17 @@ function NasStorageSection({ info }: { info: NasStorageInfo }) {
           <h3>NAS 저장소 상태</h3>
           <p className="subtitle">NAS 볼륨과 디스크의 현재 상태를 보여줍니다.</p>
         </div>
-        <Link href="/storage-history" className="nas-history-link">
-          사용량 히스토리 →
-        </Link>
       </div>
 
-      <div className={`nas-summary-card nas-summary-${barLevel}`}>
+      {/* ── 사용 현황 카드 (클릭으로 상세 펼치기) ── */}
+      <div
+        className={`nas-summary-card nas-summary-${barLevel} nas-summary-expandable${isExpanded ? ' nas-summary-open' : ''}`}
+        onClick={() => setIsExpanded(v => !v)}
+        role="button"
+        tabIndex={0}
+        aria-expanded={isExpanded}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setIsExpanded(v => !v); } }}
+      >
         <div className="nas-summary-header">
           <div className="nas-summary-title-block">
             <span className="nas-summary-title">전체 저장소 사용 현황</span>
@@ -370,10 +477,19 @@ function NasStorageSection({ info }: { info: NasStorageInfo }) {
               {info.uptimeSeconds != null && ` · 업타임 ${formatUptime(info.uptimeSeconds)}`}
             </span>
           </div>
-          {usagePct != null
-            ? <span className={`nas-usage-pct nas-usage-pct-${barLevel}`}>{usagePct}%</span>
-            : <span className="nas-usage-pct nas-usage-pct-unknown">—</span>
-          }
+          <div className="nas-summary-right">
+            {usagePct != null
+              ? <span className={`nas-usage-pct nas-usage-pct-${barLevel}`}>{usagePct}%</span>
+              : <span className="nas-usage-pct nas-usage-pct-unknown">—</span>
+            }
+            <span className="nas-expand-indicator" aria-hidden="true">
+              {isExpanded
+                ? <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 9.5l5-5 5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                : <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M2 4.5l5 5 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+              }
+              <span>{isExpanded ? '접기' : '펼치기'}</span>
+            </span>
+          </div>
         </div>
         <div className="nas-progress-outer">
           <div
@@ -402,6 +518,13 @@ function NasStorageSection({ info }: { info: NasStorageInfo }) {
           <div><dt>전체 용량</dt><dd>{formatBytes(info.totalBytes)}</dd></div>
         </dl>
       </div>
+
+      {/* ── 펼쳐진 상세 분석 영역 ── */}
+      {isExpanded && (
+        <div className="nas-expanded-area">
+          <NasHistoryTab apiBase={apiBase} />
+        </div>
+      )}
 
       {info.volumes.length > 0 && <NasVolumeTable volumes={info.volumes} />}
       {info.disks.length   > 0 && <NasDiskTable   disks={info.disks}   />}

@@ -1,11 +1,9 @@
 'use client';
 
-import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { getApiBase } from '@/lib/api';
 import type { StorageHistoryResponse, StorageSnapshot } from '@/lib/types';
 
-// ─── 포맷 유틸리티 ────────────────────────────────────────────────────────
+// ─── 유틸리티 ────────────────────────────────────────────────────────────────
 
 function fmtBytes(b: number | null | undefined): string {
   if (b == null || b <= 0) return '—';
@@ -48,13 +46,11 @@ type Predictions = {
 
 function computePredictions(snapshots: StorageSnapshot[]): Predictions | null {
   if (snapshots.length < 3) return null;
-
   const latest = snapshots[snapshots.length - 1];
   const total  = latest.totalBytes;
   if (!total || total <= 0) return null;
 
   const currentPct = (latest.usedBytes / total) * 100;
-
   const xs = snapshots.map(s => new Date(s.recordedAt).getTime() / 86_400_000);
   const ys = snapshots.map(s => s.usedBytes);
   const n  = xs.length;
@@ -93,8 +89,8 @@ function computePredictions(snapshots: StorageSnapshot[]): Predictions | null {
 // ─── SVG 차트 ─────────────────────────────────────────────────────────────
 
 const VB_W = 960;
-const VB_H = 300;
-const PAD  = { t: 14, r: 24, b: 46, l: 56 } as const;
+const VB_H = 260;
+const PAD  = { t: 14, r: 24, b: 42, l: 56 } as const;
 const CW   = VB_W - PAD.l - PAD.r;
 const CH   = VB_H - PAD.t - PAD.b;
 
@@ -113,7 +109,7 @@ function StorageChart({ snapshots }: { snapshots: StorageSnapshot[] }) {
       <div className="history-chart-empty">
         <p>사용량 추이 그래프를 표시하려면 최소 2개 이상의 기록이 필요합니다.</p>
         <p className="history-chart-empty-sub">
-          현재 {snapshots.length}개 기록됨 — 수집기(cron)가 1시간 간격으로 자동 기록합니다.
+          현재 {snapshots.length}개 기록됨 — 수집기가 1시간 간격으로 자동 기록합니다.
         </p>
       </div>
     );
@@ -141,14 +137,20 @@ function StorageChart({ snapshots }: { snapshots: StorageSnapshot[] }) {
   const areaPath = `M ${coords} L ${pts[pts.length - 1].x},${bottom} L ${pts[0].x},${bottom} Z`;
 
   const maxTicks = Math.min(pts.length, 6);
-  const tickIdxs: number[] = [];
+  const rawTickIdxs: number[] = [];
   if (pts.length <= maxTicks) {
-    pts.forEach((_, i) => tickIdxs.push(i));
+    pts.forEach((_, i) => rawTickIdxs.push(i));
   } else {
     const step = (pts.length - 1) / (maxTicks - 1);
-    for (let k = 0; k < maxTicks - 1; k++) tickIdxs.push(Math.round(k * step));
-    tickIdxs.push(pts.length - 1);
+    for (let k = 0; k < maxTicks - 1; k++) rawTickIdxs.push(Math.round(k * step));
+    rawTickIdxs.push(pts.length - 1);
   }
+  // 인접 tick 간격이 너무 좁으면 제거 (마지막 tick은 항상 유지)
+  const MIN_TICK_GAP = 75;
+  const tickIdxs = rawTickIdxs.filter((idx, i) => {
+    if (i === rawTickIdxs.length - 1) return true;
+    return pts[rawTickIdxs[i + 1]].x - pts[idx].x >= MIN_TICK_GAP;
+  });
 
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     if (!svgRef.current || !wrapRef.current) return;
@@ -170,17 +172,17 @@ function StorageChart({ snapshots }: { snapshots: StorageSnapshot[] }) {
         onMouseMove={handleMouseMove} onMouseLeave={() => setHovered(null)}
         aria-label="저장소 사용량 추이 그래프" role="img">
         <defs>
-          <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+          <linearGradient id="nasTabAreaGrad" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%"   stopColor="#3b82f6" stopOpacity="0.22" />
             <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.02" />
           </linearGradient>
-          <clipPath id="chartClip">
+          <clipPath id="nasTabChartClip">
             <rect x={PAD.l} y={PAD.t} width={CW} height={CH} />
           </clipPath>
         </defs>
 
-        <rect x={PAD.l} y={scaleY(90)}  width={CW} height={scaleY(100) - scaleY(90)} fill="rgba(220,38,38,0.055)" />
-        <rect x={PAD.l} y={scaleY(75)}  width={CW} height={scaleY(90)  - scaleY(75)} fill="rgba(217,119,6,0.055)" />
+        <rect x={PAD.l} y={scaleY(100)} width={CW} height={scaleY(90)  - scaleY(100)} fill="rgba(220,38,38,0.055)" />
+        <rect x={PAD.l} y={scaleY(90)}  width={CW} height={scaleY(75)  - scaleY(90)}  fill="rgba(217,119,6,0.055)" />
 
         {([0, 25, 50, 75, 90, 100] as const).map(pct => {
           const isT = pct === 75 || pct === 90;
@@ -200,14 +202,14 @@ function StorageChart({ snapshots }: { snapshots: StorageSnapshot[] }) {
         })}
 
         {tickIdxs.map(i => (
-          <text key={i} x={pts[i].x} y={PAD.t + CH + 18}
+          <text key={i} x={pts[i].x} y={PAD.t + CH + 17}
             textAnchor="middle" fontSize="11" fill="#9ca3af">
             {fmtDateShort(tss[i])}
           </text>
         ))}
 
-        <g clipPath="url(#chartClip)">
-          <path d={areaPath} fill="url(#areaGrad)" />
+        <g clipPath="url(#nasTabChartClip)">
+          <path d={areaPath} fill="url(#nasTabAreaGrad)" />
           <path d={linePath} fill="none" stroke="#3b82f6" strokeWidth="2.5"
             strokeLinecap="round" strokeLinejoin="round" />
           {hp && (
@@ -251,7 +253,7 @@ function StorageChart({ snapshots }: { snapshots: StorageSnapshot[] }) {
 
 // ─── 예측 카드 ────────────────────────────────────────────────────────────
 
-function PredictionCard({ title, date, color, icon, desc }: {
+function PredCard({ title, date, color, icon, desc }: {
   title: string; date: Date | null; color: 'warn' | 'error' | 'neutral'; icon: string; desc: string;
 }) {
   const days   = date ? daysFromNow(date) : null;
@@ -277,14 +279,12 @@ function PredictionCard({ title, date, color, icon, desc }: {
   );
 }
 
-// ─── 메인 페이지 ──────────────────────────────────────────────────────────
+// ─── 메인 컴포넌트 ────────────────────────────────────────────────────────
 
-export default function StorageHistoryPage() {
+export function NasHistoryTab({ apiBase }: { apiBase: string }) {
   const [snapshots, setSnapshots] = useState<StorageSnapshot[] | null>(null);
   const [loading,   setLoading]   = useState(false);
   const [fetchErr,  setFetchErr]  = useState<string | null>(null);
-
-  const apiBase = getApiBase();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -305,8 +305,8 @@ export default function StorageHistoryPage() {
   useEffect(() => { load(); }, [load]);
 
   const pred  = useMemo(() => snapshots ? computePredictions(snapshots) : null, [snapshots]);
-  const first = snapshots?.[0] ?? null;
   const last  = snapshots?.[snapshots.length - 1] ?? null;
+  const first = snapshots?.[0] ?? null;
 
   const avgDailyIncrease: number | null = useMemo(() => {
     if (!snapshots || snapshots.length < 2 || !first || !last) return null;
@@ -315,51 +315,36 @@ export default function StorageHistoryPage() {
     return (last.usedBytes - first.usedBytes) / days;
   }, [snapshots, first, last]);
 
+  if (fetchErr) {
+    return <div className="error-banner">{fetchErr}</div>;
+  }
+
   return (
-    <main className="container">
-      <header className="top-bar">
-        <div>
-          <Link href="/" className="history-back-link">← 대시보드로 돌아가기</Link>
-          <h1>저장소 사용량 히스토리</h1>
-          <p className="subtitle">NAS 용량 사용 추이 및 증가 예측 — 전체 누적 기록 기준</p>
-        </div>
-      </header>
+    <div className="nas-history-tab-wrap">
 
-      {fetchErr && <div className="error-banner">{fetchErr}</div>}
-
-      <div className="history-chart-card">
-        <div className="history-chart-header">
+      {/* ── 차트 ── */}
+      <div className="nas-history-chart-section">
+        <div className="nas-history-tab-card-header">
           <div>
-            <span className="history-chart-title">사용량 추이</span>
+            <span className="nas-summary-title">사용량 추이</span>
             {last && last.totalBytes > 0 && (
-              <span className="history-chart-subtitle">
-                전체 용량 기준 {fmtBytes(last.totalBytes)}
+              <span className="nas-summary-sub" style={{ marginLeft: 8 }}>
+                전체 {fmtBytes(last.totalBytes)}
               </span>
             )}
           </div>
-          {loading && <span className="history-chart-loading-badge">갱신 중…</span>}
+          {loading && <span className="nas-history-loading-badge">갱신 중…</span>}
         </div>
-
         {loading && !snapshots ? (
-          <div className="history-loading">데이터를 불러오는 중입니다…</div>
+          <div className="nas-history-loading">데이터를 불러오는 중입니다…</div>
         ) : snapshots ? (
           <StorageChart snapshots={snapshots} />
         ) : null}
       </div>
 
+      {/* ── 통계 4개 ── */}
       {snapshots && snapshots.length > 0 && last && (
-        <div className="history-stats-grid">
-          <div className="history-stat-card">
-            <div className="history-stat-label">일일 평균 증가량</div>
-            <div className="history-stat-value">
-              {avgDailyIncrease == null ? '—'
-                : avgDailyIncrease > 0
-                  ? `+${fmtBytes(avgDailyIncrease)}`
-                  : fmtBytes(Math.abs(avgDailyIncrease))}
-            </div>
-            <div className="history-stat-sub">전체 기간 기준</div>
-          </div>
-
+        <div className="nas-history-stats-grid">
           <div className="history-stat-card">
             <div className="history-stat-label">현재 사용률</div>
             <div className={`history-stat-value${
@@ -374,6 +359,17 @@ export default function StorageHistoryPage() {
             <div className="history-stat-sub">
               {fmtBytes(last.usedBytes)} / {fmtBytes(last.totalBytes)}
             </div>
+          </div>
+
+          <div className="history-stat-card">
+            <div className="history-stat-label">일일 평균 증가량</div>
+            <div className="history-stat-value">
+              {avgDailyIncrease == null ? '—'
+                : avgDailyIncrease > 0
+                  ? `+${fmtBytes(avgDailyIncrease)}`
+                  : fmtBytes(Math.abs(avgDailyIncrease))}
+            </div>
+            <div className="history-stat-sub">전체 기간 기준</div>
           </div>
 
           <div className="history-stat-card">
@@ -396,19 +392,44 @@ export default function StorageHistoryPage() {
         </div>
       )}
 
+      {/* ── 용량 도달 예측 4개 ── */}
       {pred && !pred.noGrowth && (
-        <section className="prediction-section">
-          <div className="prediction-section-header">
-            <h2>용량 도달 예측</h2>
-            <p className="prediction-disclaimer">
-              누적 데이터의 선형 증가 추세를 기반으로 한 추정치입니다. 실제 사용 패턴에 따라 달라질 수 있으며 확정 일정이 아닙니다.
-            </p>
+        <section className="nas-history-pred-section">
+          <div className="nas-history-pred-header">
+            <span className="nas-summary-title">용량 도달 예측</span>
+            <span className="nas-history-pred-disclaimer">
+              선형 증가 추세 기반 추정치 — 실제 사용 패턴에 따라 달라질 수 있습니다
+            </span>
           </div>
-          <div className="prediction-grid">
-            <PredictionCard title="75% 도달 예상"  date={pred.date75} color="warn"    icon="⚠️"  desc="저장소 주의 수위 도달 예상 시점" />
-            <PredictionCard title="90% 도달 예상"  date={pred.date90} color="error"   icon="🚨"  desc="저장소 위험 수위 도달 예상 시점" />
-            <PredictionCard title="백업 권장 시점"  date={pred.date85} color="warn"    icon="💾"  desc="85% 도달 전 — 본격 백업 준비 권장" />
-            <PredictionCard title="증설 검토 시점"  date={pred.date75} color="neutral" icon="💿"  desc="75% 도달 시점 기준 — 증설 계획 시작 권장" />
+          <div className="nas-history-pred-grid">
+            <PredCard
+              title="75% 도달 예상"
+              date={pred.date75}
+              color="warn"
+              icon="⚠️"
+              desc="저장소 주의 수위 도달 예상 시점"
+            />
+            <PredCard
+              title="90% 도달 예상"
+              date={pred.date90}
+              color="error"
+              icon="🚨"
+              desc="저장소 위험 수위 도달 예상 시점"
+            />
+            <PredCard
+              title="백업 권장 시점"
+              date={pred.date85}
+              color="warn"
+              icon="💾"
+              desc="85% 도달 전 — 본격 백업 준비 권장"
+            />
+            <PredCard
+              title="증설 검토 시점"
+              date={pred.date75}
+              color="neutral"
+              icon="💿"
+              desc="75% 도달 시점 기준 — 디스크 증설 계획 시작 권장"
+            />
           </div>
         </section>
       )}
@@ -422,19 +443,15 @@ export default function StorageHistoryPage() {
       {snapshots && snapshots.length < 3 && snapshots.length > 0 && (
         <div className="prediction-notice">
           <strong>예측 데이터 수집 중</strong> — 예측 표시에는 최소 3개의 기록이 필요합니다
-          (현재 {snapshots.length}개). 수집기(cron)가 1시간마다 자동으로 기록합니다.
+          (현재 {snapshots.length}개).
         </div>
       )}
 
       {snapshots?.length === 0 && !loading && (
         <div className="prediction-notice">
-          아직 기록된 데이터가 없습니다. 수집기(<code>npm run push-to-cf</code>)를 실행하면 기록이 시작됩니다.
+          아직 기록된 데이터가 없습니다. 수집기가 1시간마다 자동으로 기록합니다.
         </div>
       )}
-
-      <footer className="footer">
-        <p>사용량은 수집기(cron)에 의해 1시간마다 Cloudflare D1에 자동 기록됩니다.</p>
-      </footer>
-    </main>
+    </div>
   );
 }

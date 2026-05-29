@@ -10,6 +10,7 @@
  *   GET  /api/storage-history   — 저장소 스냅샷 조회
  *   GET  /api/nas-status        — 최신 NAS 상태 조회
  *   GET  /api/services          — 최신 서비스 상태 조회
+ *   GET  /api/service-history   — 서비스 가동 이력 조회 (최근 30일)
  *
  * 인증: POST 엔드포인트는 X-API-Key 헤더 (= CF_INGEST_API_KEY secret) 필요
  *      GET  엔드포인트는 인증 없음 (Cloudflare Access로 팀 접근 제어)
@@ -20,22 +21,40 @@ export interface Env {
   CF_INGEST_API_KEY: string;
 }
 
-// ─── 공통 헬퍼 ─────────────────────────────────────────────────────────────
+// ─── CORS + 공통 헬퍼 ──────────────────────────────────────────────────────
 
-function json(body: unknown, init?: ResponseInit): Response {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(init?.headers as Record<string, string> | undefined),
-    },
-  });
-}
+/**
+ * Cloudflare Pages(및 로컬 개발 서버)에서 Workers API를 호출할 때
+ * 브라우저의 Same-Origin Policy를 통과하기 위한 CORS 헤더입니다.
+ *
+ * Access-Control-Allow-Origin: *
+ *   → 팀 내부 도구이므로 전체 오픈으로 설정합니다.
+ *     필요 시 Pages 도메인(예: https://richschool-dashboard.pages.dev)으로 좁힐 수 있습니다.
+ */
+const CORS_HEADERS: Record<string, string> = {
+  'Access-Control-Allow-Origin':  '*',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, X-API-Key',
+  'Access-Control-Max-Age':       '86400',
+};
 
 const NO_CACHE: Record<string, string> = {
   'Cache-Control': 'no-store, max-age=0',
 };
+
+/** JSON 응답 헬퍼 — CORS + charset=utf-8 을 모든 응답에 자동 포함합니다. */
+function json(body: unknown, init?: ResponseInit): Response {
+  const baseHeaders: Record<string, string> = {
+    'Content-Type': 'application/json; charset=utf-8',
+    ...CORS_HEADERS,
+  };
+  const extraHeaders = init?.headers as Record<string, string> | undefined;
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    ...init,
+    headers: { ...baseHeaders, ...extraHeaders },
+  });
+}
 
 function authFail(): Response {
   return json(
@@ -56,8 +75,12 @@ export default {
     const { method, url } = request;
     const { pathname }    = new URL(url);
 
+    // OPTIONS preflight — 브라우저가 실제 요청 전에 보내는 사전 확인 요청
     if (method === 'OPTIONS') {
-      return new Response(null, { status: 204 });
+      return new Response(null, {
+        status: 204,
+        headers: CORS_HEADERS,
+      });
     }
 
     // ── POST (수집기 → D1) ───────────────────────────────────────────────
@@ -66,9 +89,14 @@ export default {
     if (method === 'POST' && pathname === '/api/ingest/services')   return handleIngestServices(request, env);
 
     // ── GET (대시보드 → Workers) ─────────────────────────────────────────
-    if (method === 'GET' && pathname === '/api/storage-history') return handleGetHistory(request, env);
-    if (method === 'GET' && pathname === '/api/nas-status')      return handleGetNas(env);
-    if (method === 'GET' && pathname === '/api/services')        return handleGetServices(env);
+    if (method === 'GET' && pathname === '/api/storage-history')  return handleGetHistory(request, env);
+    if (method === 'GET' && pathname === '/api/nas-status')       return handleGetNas(env);
+    if (method === 'GET' && pathname === '/api/services')         return handleGetServices(env);
+    if (method === 'GET' && pathname === '/api/service-history')  return handleGetServiceHistory(env);
+
+    // ── 새로고침 트리거 ──────────────────────────────────────────────────
+    if (method === 'POST' && pathname === '/api/request-refresh') return handleRequestRefresh(env);
+    if (method === 'GET'  && pathname === '/api/poll')            return handlePoll(request, env);
 
     return json({ ok: false, error: 'Not Found' }, { status: 404 });
   },
@@ -211,7 +239,54 @@ async function handleIngestServices(request: Request, env: Env): Promise<Respons
   } catch (err) {
     return json({ ok: false, error: `D1 기록 실패: ${(err as Error).message}` }, { status: 500 });
   }
+  // 서비스 수집 완료 → 새로고침 트리거 플래그 클리어
+  try {
+    await env.DB
+      .prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('pending_refresh', '0')")
+      .run();
+  } catch { /* 무시 */ }
   return json({ ok: true });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  POST /api/request-refresh  — 대시보드에서 NAS 수집 즉시 트리거
+// ═══════════════════════════════════════════════════════════════════════════
+
+async function handleRequestRefresh(env: Env): Promise<Response> {
+  try {
+    await env.DB
+      .prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('pending_refresh', '1')")
+      .run();
+    return json({ ok: true });
+  } catch (err) {
+    return json({ ok: false, error: `D1 기록 실패: ${(err as Error).message}` }, { status: 500 });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  GET /api/poll  — NAS 수집기가 트리거 여부 및 마지막 수집 시각 확인
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface PollSettingRow  { value:       string }
+interface PollSnapshotRow { recorded_at: string }
+
+async function handlePoll(request: Request, env: Env): Promise<Response> {
+  if (!verifyKey(request, env)) return authFail();
+  try {
+    const [pendingResult, lastResult] = await env.DB.batch<PollSettingRow | PollSnapshotRow>([
+      env.DB.prepare("SELECT value FROM settings WHERE key = 'pending_refresh'"),
+      env.DB.prepare("SELECT recorded_at FROM storage_snapshots ORDER BY recorded_at DESC LIMIT 1"),
+    ]);
+    const pendingRow = pendingResult.results[0] as PollSettingRow  | undefined;
+    const lastRow    = lastResult.results[0]    as PollSnapshotRow | undefined;
+    return json({
+      ok:              true,
+      pendingRefresh:  pendingRow?.value === '1',
+      lastCollectedAt: lastRow?.recorded_at ?? null,
+    }, { headers: NO_CACHE });
+  } catch (err) {
+    return json({ ok: false, error: `D1 조회 실패: ${(err as Error).message}` }, { status: 500 });
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -365,6 +440,51 @@ async function handleGetServices(env: Env): Promise<Response> {
     }));
 
     return json({ ok: true, checkedAt, services }, { headers: NO_CACHE });
+  } catch (err) {
+    return json({ ok: false, error: `D1 조회 실패: ${(err as Error).message}` }, { status: 500 });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  GET /api/service-history
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface ServiceHistoryRow {
+  recorded_at: string;
+  service_id:  string;
+  name:        string;
+  category:    string | null;
+  status:      string;
+  response_ms: number | null;
+  http_status: number | null;
+  message:     string | null;
+}
+
+async function handleGetServiceHistory(env: Env): Promise<Response> {
+  try {
+    const { results } = await env.DB
+      .prepare(`
+        SELECT recorded_at, service_id, name, category, status, response_ms, http_status, message
+        FROM   service_status
+        WHERE  recorded_at >= datetime('now', '-30 days')
+          AND  status != 'placeholder'
+        ORDER BY recorded_at DESC
+        LIMIT 5000
+      `)
+      .all<ServiceHistoryRow>();
+
+    const records = results.map(r => ({
+      recordedAt:  r.recorded_at,
+      serviceId:   r.service_id,
+      name:        r.name,
+      category:    r.category    ?? undefined,
+      status:      r.status,
+      responseMs:  r.response_ms ?? null,
+      httpStatus:  r.http_status ?? null,
+      message:     r.message     ?? undefined,
+    }));
+
+    return json({ ok: true, records }, { headers: NO_CACHE });
   } catch (err) {
     return json({ ok: false, error: `D1 조회 실패: ${(err as Error).message}` }, { status: 500 });
   }
